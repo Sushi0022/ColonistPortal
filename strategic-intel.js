@@ -31,42 +31,63 @@ export class StrategicIntel {
   // Get recommendation for a specific player
   getRecommendationForPlayer(player) {
     const playerResources = this.rt.getPlayerResources()[player] || {};
-    // If player data missing, return null
     if (!playerResources) return null;
 
-    // Evaluate all builds and pick the one with smallest totalMissing
-    let best = null;
-    for (const build of this.BUILDS) {
+    // Evaluate all builds and compute a richer set of metrics per build
+    const scored = this.BUILDS.map((build) => {
       const { missing, totalMissing } = this.missingForBuild(playerResources, build.cost);
       const canAfford = totalMissing === 0;
-      const score = 1 / (1 + totalMissing); // higher score for closer builds
-      if (!best || score > best.score) {
-        best = { build: build.key, cost: build.cost, missing, totalMissing, canAfford, score };
-      }
-    }
+      // progress: fraction of resources owned for this build (0-1)
+      const totalCost = Object.values(build.cost).reduce((a,b)=>a+b,0);
+      const owned = totalCost - totalMissing;
+      const progressFraction = totalCost === 0 ? 1 : owned / totalCost;
+      // prefer builds that give VP when equally close
+      const score = progressFraction + (build.vp || 0) * 0.02 - totalMissing * 0.01;
+      return {
+        key: build.key,
+        cost: build.cost,
+        missing,
+        totalMissing,
+        canAfford,
+        progressFraction,
+        score,
+        vp: build.vp || 0,
+      };
+    }).sort((a,b)=>b.score - a.score);
 
-    // Create simple textual recommendation
+    const best = scored[0];
+    if (!best) return null;
+
+    // Build textual recommendation with more info
     let text = "";
     if (best.canAfford) {
-      text = `You can build a ${best.build} now.`;
+      text = `Can build ${best.key} now.`;
     } else {
-      // Recommend the resource with largest missing quantity
-      const sorted = Object.entries(best.missing).sort((a, b) => b[1] - a[1]);
-      const primary = sorted.find((s) => s[1] > 0);
-      if (primary) text = `Collect ${primary[0]} (need ${primary[1]} more) to get a ${best.build}.`;
-      else text = `Work towards a ${best.build}.`;
+      // show up to two most-missing resources
+      const sorted = Object.entries(best.missing).filter(([k,v])=>v>0).sort((a,b)=>b[1]-a[1]);
+      if (sorted.length === 0) text = `Work towards a ${best.key}.`;
+      else {
+        const primary = sorted[0];
+        const secondary = sorted[1];
+        text = `Need ${primary[1]} ${primary[0]}` + (secondary ? ` and ${secondary[1]} ${secondary[0]}` : ``) + ` for ${best.key}.`;
+      }
     }
-
-    // Basic win-probability-like heuristic (not a true probability)
-    const progress = Math.round(best.score * 100);
 
     return {
       player,
       recommendation: text,
-      targetBuild: best.build,
+      targetBuild: best.key,
       missing: best.missing,
-      progress,
+      progress: Math.round(best.progressFraction * 100),
+      affordable: best.canAfford,
+      vp: best.vp,
+      allBuilds: scored,
     };
+  }
+
+  // Get a short recommendation for a single player (alias)
+  getTopRecommendation(player) {
+    return this.getRecommendationForPlayer(player);
   }
 
   // Get recommendations for all players (or a specific list)

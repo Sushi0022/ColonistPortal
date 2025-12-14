@@ -18,9 +18,11 @@ export class UIOverlay {
         "username",
         "debugMode",
         "overlayPosition",
+        "intelMode",
       ]);
       this.storedUsername = result.username || null;
       this.debugMode = result.debugMode !== undefined ? result.debugMode : true;
+      this.intelMode = result.intelMode !== undefined ? result.intelMode : true;
       if (result.overlayPosition) {
         this.position = result.overlayPosition;
       }
@@ -36,6 +38,7 @@ export class UIOverlay {
         username: this.storedUsername,
         debugMode: this.debugMode,
         overlayPosition: this.position,
+        intelMode: this.intelMode,
       });
     } catch (error) {
       console.log("[Catan Card Tracker] Error saving settings:", error);
@@ -433,6 +436,25 @@ export class UIOverlay {
 
     controlsSection.appendChild(debugToggle);
 
+    // Intelligence toggle
+    const intelToggle = document.createElement("div");
+    intelToggle.className = "catan-ct-debug-toggle";
+    const intelLabel = document.createElement("span");
+    intelLabel.textContent = "Intel";
+    intelToggle.appendChild(intelLabel);
+    const intelSwitch = document.createElement("div");
+    intelSwitch.className = `catan-ct-toggle-switch ${this.intelMode ? 'active' : ''}`;
+    intelSwitch.addEventListener('click', () => {
+      this.intelMode = !this.intelMode;
+      this.saveSettings();
+      this.renderOverlay(playerResources, resourceTypes, eventLogs, theftInfo, strategicIntel);
+    });
+    const intelSlider = document.createElement('div');
+    intelSlider.className = 'catan-ct-toggle-slider';
+    intelSwitch.appendChild(intelSlider);
+    intelToggle.appendChild(intelSwitch);
+    controlsSection.appendChild(intelToggle);
+
     // Username change option
     if (this.storedUsername) {
       const usernameChange = document.createElement("div");
@@ -585,6 +607,21 @@ export class UIOverlay {
       }
 
       this.overlayRoot.appendChild(row);
+
+      // Show a compact strategic recommendation under the player's row if intelMode is enabled
+      try {
+        if (strategicIntel && this.intelMode) {
+          const rec = strategicIntel.getTopRecommendation(player);
+          if (rec) {
+            const recRow = document.createElement('div');
+            recRow.style.fontSize = '12px';
+            recRow.style.color = '#ccc';
+            recRow.style.margin = '4px 0 8px 0';
+            recRow.textContent = `Intel: ${rec.recommendation} (Progress: ${rec.progress}%)`;
+            this.overlayRoot.appendChild(recRow);
+          }
+        }
+      } catch (e) {}
     }
 
     // Show potential theft deltas count if available
