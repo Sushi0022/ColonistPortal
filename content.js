@@ -1,10 +1,12 @@
 // == Catan Card Tracker Overlay ==
 import { ResourceTracker } from "./resource-tracker.js";
 import { UIOverlay } from "./ui-overlay.js";
+import { StrategicIntel } from "./strategic-intel.js";
 
 (function () {
   // Initialize modules
   const resourceTracker = new ResourceTracker();
+  const strategicIntel = new StrategicIntel(resourceTracker);
   const uiOverlay = new UIOverlay();
 
   // Make resourceTracker globally accessible for UI interactions
@@ -19,17 +21,40 @@ import { UIOverlay } from "./ui-overlay.js";
       playerResources,
       resourceTypes,
       eventLogs,
-      resourceTracker
+      resourceTracker,
+      strategicIntel
     );
     console.log("[Catan Card Tracker] Forced overlay render for debugging");
   }
 
   // Set up MutationObserver
   function setupObserver() {
-    // Find chat log container
-    const chatLog = document.querySelector(
-      'div[class*="pJOx4Tg4n9S8O1RM16YT"]'
-    );
+    // Find chat log container using robust heuristics (look for container
+    // that contains multiple entries with player-name spans or card images)
+    function isChatEntryNode(node) {
+      if (!node || node.nodeType !== 1) return false;
+      // Player name span used by colonist.io logs
+      if (node.querySelector && node.querySelector('span[style*="font-weight:600"]')) return true;
+      // Resource card images
+      const imgs = node.getElementsByTagName ? Array.from(node.getElementsByTagName('img')) : [];
+      if (imgs.some((img) => /card_(wool|lumber|brick|ore|grain)/.test(img.src || img.alt || ''))) return true;
+      return false;
+    }
+
+    // Heuristic: pick a div that has many chat-like children
+    let chatLog = null;
+    const candidateDivs = Array.from(document.querySelectorAll('div'));
+    let best = { node: null, score: 0 };
+    for (const d of candidateDivs) {
+      let score = 0;
+      for (const child of Array.from(d.children)) {
+        if (isChatEntryNode(child)) score++;
+      }
+      if (score > best.score) {
+        best = { node: d, score };
+      }
+    }
+    if (best.score > 0) chatLog = best.node;
     if (!chatLog) {
       setTimeout(setupObserver, 1000); // Retry until found
       return;
@@ -48,20 +73,14 @@ import { UIOverlay } from "./ui-overlay.js";
       // Collect all new entries
       for (const m of mutations) {
         for (const node of m.addedNodes) {
-          if (
-            node.nodeType === 1 &&
-            node.classList.contains("O8TLknGehHkVfT5IRcHW")
-          ) {
-            newEntries.push(node);
-          }
+          if (isChatEntryNode(node)) newEntries.push(node);
         }
       }
 
       // Process entries with previous element context
       if (newEntries.length > 0) {
-        const allEntries = Array.from(
-          chatLog.querySelectorAll("div.O8TLknGehHkVfT5IRcHW")
-        );
+        // Build the list of all entries by filtering chatLog children
+        const allEntries = Array.from(chatLog.children).filter(isChatEntryNode);
 
         for (let i = 0; i < newEntries.length; i++) {
           const entry = newEntries[i];
@@ -87,7 +106,8 @@ import { UIOverlay } from "./ui-overlay.js";
           playerResources,
           resourceTypes,
           eventLogs,
-          resourceTracker
+          resourceTracker,
+          strategicIntel
         );
       }
     });
@@ -95,10 +115,7 @@ import { UIOverlay } from "./ui-overlay.js";
     observer.observe(chatLog, { childList: true });
 
     // Parse existing entries (optional)
-    const existingEntries = chatLog.querySelectorAll(
-      "div.O8TLknGehHkVfT5IRcHW"
-    );
-    const allEntries = Array.from(existingEntries);
+    const allEntries = Array.from(chatLog.children).filter(isChatEntryNode);
 
     for (let i = 0; i < allEntries.length; i++) {
       const entry = allEntries[i];
@@ -113,7 +130,8 @@ import { UIOverlay } from "./ui-overlay.js";
           playerResources,
           resourceTypes,
           eventLogs,
-          resourceTracker
+          resourceTracker,
+          strategicIntel
         );
       }
     }

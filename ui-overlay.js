@@ -226,6 +226,7 @@ export class UIOverlay {
     resourceTypes,
     eventLogs = [],
     theftInfo = null
+  , strategicIntel = null
   ) {
     if (!this.overlayRoot) {
       this.overlayRoot = document.createElement("div");
@@ -277,7 +278,8 @@ export class UIOverlay {
             resourceTypes,
             eventLogs,
             theftInfo
-          );
+              , strategicIntel
+              );
         });
         setupSection.appendChild(changeLink);
       } else {
@@ -333,7 +335,8 @@ export class UIOverlay {
                   playerResources,
                   resourceTypes,
                   eventLogs,
-                  window.resourceTracker
+                    window.resourceTracker,
+                    strategicIntel
                 );
               }, 100);
             }
@@ -377,7 +380,8 @@ export class UIOverlay {
                 playerResources,
                 resourceTypes,
                 eventLogs,
-                window.resourceTracker
+                 window.resourceTracker,
+                 strategicIntel
               );
             }, 100);
           }
@@ -419,7 +423,7 @@ export class UIOverlay {
     toggleSwitch.addEventListener("click", () => {
       this.debugMode = !this.debugMode;
       this.saveSettings();
-      this.renderOverlay(playerResources, resourceTypes, eventLogs, theftInfo);
+      this.renderOverlay(playerResources, resourceTypes, eventLogs, theftInfo, strategicIntel);
     });
 
     const toggleSlider = document.createElement("div");
@@ -441,13 +445,57 @@ export class UIOverlay {
           playerResources,
           resourceTypes,
           eventLogs,
-          theftInfo
+          theftInfo,
+          strategicIntel
         );
       });
       controlsSection.appendChild(usernameChange);
     }
 
     this.overlayRoot.appendChild(controlsSection);
+
+    // Strategic recommendation (show for current player if available)
+    try {
+      const players = Object.keys(playerResources);
+      const currentPlayer =
+        (theftInfo && theftInfo.currentPlayerUsername) ||
+        this.storedUsername ||
+        players[0];
+      if (strategicIntel && currentPlayer) {
+        const rec = strategicIntel.getRecommendationForPlayer(currentPlayer);
+        if (rec) {
+          const recBox = document.createElement("div");
+          recBox.style.margin = "8px 0";
+          recBox.style.padding = "8px";
+          recBox.style.background = "rgba(255,255,255,0.03)";
+          recBox.style.borderRadius = "6px";
+          recBox.style.fontSize = "13px";
+
+          const recTitle = document.createElement("div");
+          recTitle.textContent = `Recommendation for ${currentPlayer}`;
+          recTitle.style.fontWeight = "700";
+          recTitle.style.color = "#ffd700";
+          recTitle.style.marginBottom = "6px";
+          recBox.appendChild(recTitle);
+
+          const recText = document.createElement("div");
+          recText.textContent = rec.recommendation;
+          recText.style.color = "#ddd";
+          recBox.appendChild(recText);
+
+          const progress = document.createElement("div");
+          progress.textContent = `Progress: ${rec.progress}%`;
+          progress.style.fontSize = "12px";
+          progress.style.color = "#aaa";
+          progress.style.marginTop = "6px";
+          recBox.appendChild(progress);
+
+          this.overlayRoot.appendChild(recBox);
+        }
+      }
+    } catch (e) {
+      // ignore recommendation errors
+    }
 
     for (const [player, resources] of Object.entries(playerResources)) {
       const row = document.createElement("div");
