@@ -11,6 +11,20 @@ export class UIOverlay {
     this.loadSettings();
   }
 
+  // Helper to read and save capture endpoint settings
+  async getCaptureSettings() {
+    try {
+      const r = await chrome.storage.local.get(["visionEndpoint", "visionAuthHeader"]);
+      return { endpoint: r.visionEndpoint || "", authHeader: r.visionAuthHeader || "" };
+    } catch (e) { return { endpoint: "", authHeader: "" }; }
+  }
+
+  async saveCaptureSettings(endpoint, authHeader) {
+    try {
+      await chrome.storage.local.set({ visionEndpoint: endpoint, visionAuthHeader: authHeader });
+    } catch (e) {}
+  }
+
   // Load settings from Chrome storage
   async loadSettings() {
     try {
@@ -242,6 +256,28 @@ export class UIOverlay {
 
     this.overlayRoot.innerHTML = "";
 
+    // Helpers for background messaging with consistent timeouts/retries
+    const sendRequestBg = (url, options, opts = {}) => new Promise((resolve) => {
+      try {
+        chrome.runtime.sendMessage({ type: 'send_request', url, options, timeoutMs: opts.timeoutMs || 15000, retries: opts.retries || 2 }, (resp) => {
+          if (chrome.runtime.lastError) return resolve({ error: chrome.runtime.lastError.message });
+          resolve(resp);
+        });
+      } catch (e) { resolve({ error: e && e.message ? e.message : String(e) }); }
+    });
+
+    const captureBg = (timeoutMs = 10000) => new Promise((resolve, reject) => {
+      try {
+        chrome.runtime.sendMessage({ type: 'capture_tab', timeoutMs }, (resp) => {
+          if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+          if (!resp) return reject(new Error('No response from background'));
+          if (resp.error) return reject(new Error(resp.error));
+          resolve(resp.dataUrl);
+        });
+      } catch (e) { reject(e); }
+      // Note: background has its own timeout guard; this promise will reject if runtime.lastError occurs
+    });
+
     // If no players, show username input section
     if (Object.keys(playerResources).length === 0) {
       const setupSection = document.createElement("div");
@@ -454,6 +490,414 @@ export class UIOverlay {
     intelSwitch.appendChild(intelSlider);
     intelToggle.appendChild(intelSwitch);
     controlsSection.appendChild(intelToggle);
+
+    // Capture & Analyze control
+    const captureControl = document.createElement('div');
+    captureControl.style.display = 'flex';
+    captureControl.style.alignItems = 'center';
+    captureControl.style.gap = '8px';
+
+    const captureBtn = document.createElement('button');
+    captureBtn.textContent = 'Capture & Analyze';
+    captureBtn.style.padding = '6px 10px';
+    captureBtn.style.background = '#4caf50';
+    captureBtn.style.color = '#fff';
+    captureBtn.style.border = 'none';
+    captureBtn.style.borderRadius = '6px';
+    captureBtn.style.cursor = 'pointer';
+    captureBtn.title = 'Share a tab/window to capture a screenshot and send to your vision endpoint';
+
+    const cfgLink = document.createElement('a');
+    cfgLink.textContent = 'Endpoint';
+    cfgLink.style.fontSize = '12px';
+    cfgLink.style.color = '#ffd700';
+    cfgLink.style.cursor = 'pointer';
+
+    captureControl.appendChild(captureBtn);
+    captureControl.appendChild(cfgLink);
+    controlsSection.appendChild(captureControl);
+
+    // Endpoint configuration panel (hidden by default)
+    const cfgPanel = document.createElement('div');
+    cfgPanel.style.display = 'none';
+    cfgPanel.style.marginTop = '8px';
+    cfgPanel.style.padding = '8px';
+    cfgPanel.style.background = 'rgba(255,255,255,0.02)';
+    cfgPanel.style.borderRadius = '6px';
+    cfgPanel.style.flexDirection = 'column';
+
+    const endpointInput = document.createElement('input');
+    endpointInput.placeholder = 'https://your-server.example/vision';
+    endpointInput.style.width = '100%';
+    endpointInput.style.padding = '6px';
+    endpointInput.style.marginBottom = '6px';
+    endpointInput.style.borderRadius = '4px';
+    endpointInput.style.border = '1px solid rgba(255,255,255,0.08)';
+    endpointInput.style.background = 'rgba(0,0,0,0.25)';
+    endpointInput.style.color = '#fff';
+
+    const authInput = document.createElement('input');
+    authInput.placeholder = 'Optional Authorization header value (e.g. Bearer XYZ)';
+    authInput.style.width = '100%';
+    authInput.style.padding = '6px';
+    authInput.style.borderRadius = '4px';
+    authInput.style.border = '1px solid rgba(255,255,255,0.08)';
+    authInput.style.background = 'rgba(0,0,0,0.25)';
+    authInput.style.color = '#fff';
+    authInput.style.marginBottom = '6px';
+
+    const saveCfg = document.createElement('button');
+    saveCfg.textContent = 'Save';
+    saveCfg.style.padding = '6px 10px';
+    saveCfg.style.border = 'none';
+    saveCfg.style.borderRadius = '6px';
+    saveCfg.style.background = '#ffd700';
+    saveCfg.style.cursor = 'pointer';
+
+    cfgPanel.appendChild(endpointInput);
+    cfgPanel.appendChild(authInput);
+    cfgPanel.appendChild(saveCfg);
+    controlsSection.appendChild(cfgPanel);
+
+    cfgLink.addEventListener('click', async () => {
+      // load stored settings
+      const s = await this.getCaptureSettings();
+      endpointInput.value = s.endpoint || '';
+      authInput.value = s.authHeader || '';
+      cfgPanel.style.display = cfgPanel.style.display === 'none' ? 'flex' : 'none';
+    });
+
+    saveCfg.addEventListener('click', async () => {
+      await this.saveCaptureSettings(endpointInput.value.trim(), authInput.value.trim());
+      cfgPanel.style.display = 'none';
+    });
+
+    captureBtn.addEventListener('click', async () => {
+      // Fetch saved settings and perform capture
+      const s = await this.getCaptureSettings();
+      const endpoint = s.endpoint;
+      const auth = s.authHeader;
+      if (!endpoint) {
+        alert('Please configure a vision endpoint first (click Endpoint).');
+        return;
+      }
+      try {
+        captureBtn.textContent = 'Capturing...';
+        captureBtn.disabled = true;
+
+        // Try background/native capture first
+        let capturedDataUrl = null;
+        try {
+          capturedDataUrl = await captureBg(10000);
+        } catch (bgErr) {
+          // Background capture failed — fall back to in-page capture via map-analyzer
+          try {
+            const mod = await import('./map-analyzer.js');
+            const headers = {};
+            if (auth) headers['Authorization'] = auth;
+            const resp = await mod.captureAndSendToEndpoint(endpoint, headers);
+            captureBtn.textContent = 'Capture & Analyze';
+            captureBtn.disabled = false;
+            try {
+              const msg = typeof resp === 'object' ? JSON.stringify(resp, null, 2) : String(resp);
+              alert('Vision response:\n' + (msg.slice ? msg.slice(0,2000) : msg));
+              if (window.resourceTracker && window.resourceTracker.addEventLog) {
+                window.resourceTracker.addEventLog('[VISION] ' + (typeof resp === 'object' ? JSON.stringify(resp) : String(resp)));
+              }
+            } catch (e) { console.log('Vision resp', resp); }
+            return;
+          } catch (fallbackErr) {
+            captureBtn.textContent = 'Capture & Analyze';
+            captureBtn.disabled = false;
+            alert('Capture failed: ' + (fallbackErr && fallbackErr.message ? fallbackErr.message : String(fallbackErr)));
+            return;
+          }
+        }
+
+        // If we have a data URL from background capture, ask background to POST it (avoids CORS)
+        try {
+          const headers = Object.assign({ 'Content-Type': 'application/json' }, (auth ? { 'Authorization': auth } : {}));
+          const body = JSON.stringify({ image: capturedDataUrl });
+          const resp = await sendRequestBg(endpoint, { method: 'POST', headers, body }, { timeoutMs: 20000, retries: 2 });
+          captureBtn.textContent = 'Capture & Analyze';
+          captureBtn.disabled = false;
+          if (!resp) {
+            alert('Failed to send captured image: no response from background proxy');
+          } else if (resp.error) {
+            alert('Failed to send captured image: ' + resp.error);
+          } else {
+            const display = resp.json || resp.text || { status: resp.status };
+            alert('Vision response:\n' + (typeof display === 'object' ? JSON.stringify(display, null, 2).slice(0,2000) : String(display)));
+            if (window.resourceTracker && window.resourceTracker.addEventLog) window.resourceTracker.addEventLog('[VISION] ' + (typeof display === 'object' ? JSON.stringify(display) : String(display)));
+          }
+        } catch (e) {
+          captureBtn.textContent = 'Capture & Analyze';
+          captureBtn.disabled = false;
+          alert('Failed to send captured image: ' + (e && e.message ? e.message : String(e)));
+        }
+      } catch (error) {
+        captureBtn.textContent = 'Capture & Analyze';
+        captureBtn.disabled = false;
+        alert('Capture failed: ' + (error && error.message ? error.message : String(error)));
+      }
+    });
+
+    // Additional button: send directly to Google Vision (Gemini workflows)
+    const googleBtn = document.createElement('button');
+    googleBtn.textContent = 'Send to Google Vision';
+    googleBtn.style.padding = '6px 10px';
+    googleBtn.style.background = '#1a73e8';
+    googleBtn.style.color = '#fff';
+    googleBtn.style.border = 'none';
+    googleBtn.style.borderRadius = '6px';
+    googleBtn.style.cursor = 'pointer';
+    captureControl.appendChild(googleBtn);
+
+    // Gemini button (sends to configured endpoint expecting Gemini/Vertex proxy)
+    const geminiBtn = document.createElement('button');
+    geminiBtn.textContent = 'Send to Gemini';
+    geminiBtn.style.padding = '6px 10px';
+    geminiBtn.style.background = '#00b894';
+    geminiBtn.style.color = '#fff';
+    geminiBtn.style.border = 'none';
+    geminiBtn.style.borderRadius = '6px';
+    geminiBtn.style.cursor = 'pointer';
+    captureControl.appendChild(geminiBtn);
+
+    googleBtn.addEventListener('click', async () => {
+      const s = await this.getCaptureSettings();
+      // If auth input contains a raw API key, prefer that; otherwise prompt
+      let apiKey = s.authHeader || '';
+      if (!apiKey) apiKey = prompt('Enter Google Cloud Vision API key (will not be stored):');
+      if (!apiKey) return alert('API key required');
+      try {
+        googleBtn.textContent = 'Capturing...';
+        googleBtn.disabled = true;
+
+        // Try native background capture first
+        let dataUrl = null;
+        try {
+          dataUrl = await captureBg(10000);
+        } catch (bgErr) {
+          // fallback to in-page capture via map-analyzer helper
+          try {
+            const mod = await import('./map-analyzer.js');
+            const resp = await mod.captureAndSendToGoogleVision(apiKey.replace(/^Bearer\s+/i, '').trim());
+            googleBtn.textContent = 'Send to Google Vision';
+            googleBtn.disabled = false;
+            const msg = typeof resp === 'object' ? JSON.stringify(resp, null, 2) : String(resp);
+            alert('Google Vision response:\n' + (msg.slice ? msg.slice(0,2000) : msg));
+            if (window.resourceTracker && window.resourceTracker.addEventLog) window.resourceTracker.addEventLog('[GVISION] ' + (typeof resp === 'object' ? JSON.stringify(resp) : String(resp)));
+            return;
+          } catch (fallbackErr) {
+            googleBtn.textContent = 'Send to Google Vision';
+            googleBtn.disabled = false;
+            alert('Google Vision capture failed: ' + (fallbackErr && fallbackErr.message ? fallbackErr.message : String(fallbackErr)));
+            return;
+          }
+        }
+
+        // Use the background-captured dataUrl and call Google Vision REST API
+        try {
+          const base64 = dataUrl.split(',')[1];
+          const url = `https://vision.googleapis.com/v1/images:annotate?key=${encodeURIComponent(apiKey.replace(/^Bearer\s+/i, '').trim())}`;
+          const body = {
+            requests: [
+              {
+                image: { content: base64 },
+                features: [
+                  { type: 'TEXT_DETECTION', maxResults: 10 },
+                  { type: 'LABEL_DETECTION', maxResults: 20 },
+                  { type: 'OBJECT_LOCALIZATION', maxResults: 50 }
+                ]
+              }
+            ]
+          };
+          const resp = await sendRequestBg(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, { timeoutMs: 20000, retries: 2 });
+          googleBtn.textContent = 'Send to Google Vision';
+          googleBtn.disabled = false;
+          if (!resp) {
+            alert('Google Vision capture failed: no response from background proxy');
+          } else if (resp.error) {
+            alert('Google Vision capture failed: ' + resp.error);
+          } else {
+            const msg = resp.json || resp.text || { status: resp.status };
+            alert('Google Vision response:\n' + (typeof msg === 'object' ? JSON.stringify(msg, null, 2).slice(0,2000) : String(msg)));
+            if (window.resourceTracker && window.resourceTracker.addEventLog) window.resourceTracker.addEventLog('[GVISION] ' + (typeof msg === 'object' ? JSON.stringify(msg) : String(msg)));
+          }
+        } catch (e) {
+          googleBtn.textContent = 'Send to Google Vision';
+          googleBtn.disabled = false;
+          alert('Google Vision capture failed: ' + (e && e.message ? e.message : String(e)));
+        }
+      } catch (e) {
+        googleBtn.textContent = 'Send to Google Vision';
+        googleBtn.disabled = false;
+        alert('Google Vision capture failed: ' + (e && e.message ? e.message : String(e)));
+      }
+    });
+
+    geminiBtn.addEventListener('click', async () => {
+      const s = await this.getCaptureSettings();
+      const endpoint = s.endpoint;
+      const auth = s.authHeader;
+      if (!endpoint) return alert('Please configure a Gemini endpoint first (click Endpoint).');
+      try {
+        geminiBtn.textContent = 'Capturing...';
+        geminiBtn.disabled = true;
+        let dataUrl = null;
+        try {
+          dataUrl = await captureBg(10000);
+        } catch (bgErr) {
+          // fallback to in-page capture via map-analyzer
+          try {
+            const mod = await import('./map-analyzer.js');
+            const headers = {};
+            if (auth) headers['Authorization'] = auth;
+            const resp = await mod.captureAndSendToGemini(endpoint, headers, 'gemini-1.5');
+            geminiBtn.textContent = 'Send to Gemini';
+            geminiBtn.disabled = false;
+            const msg = typeof resp === 'object' ? JSON.stringify(resp, null, 2) : String(resp);
+            alert('Gemini response:\n' + (msg.slice ? msg.slice(0,2000) : msg));
+            if (window.resourceTracker && window.resourceTracker.addEventLog) window.resourceTracker.addEventLog('[GEMINI] ' + (typeof resp === 'object' ? JSON.stringify(resp) : String(resp)));
+            return;
+          } catch (fallbackErr) {
+            geminiBtn.textContent = 'Send to Gemini';
+            geminiBtn.disabled = false;
+            alert('Gemini capture failed: ' + (fallbackErr && fallbackErr.message ? fallbackErr.message : String(fallbackErr)));
+            return;
+          }
+        }
+
+        // Send captured image to configured endpoint via background proxy
+        try {
+          const baseHeaders = Object.assign({ 'Content-Type': 'application/json' }, (auth ? { 'Authorization': auth } : {}));
+          const base64 = dataUrl.split(',')[1];
+          const body = JSON.stringify({ image: base64, model: 'gemini-1.5' });
+          const resp = await sendRequestBg(endpoint, { method: 'POST', headers: baseHeaders, body }, { timeoutMs: 30000, retries: 2 });
+          geminiBtn.textContent = 'Send to Gemini';
+          geminiBtn.disabled = false;
+          if (!resp) return alert('No response from background proxy');
+          if (resp.error) return alert('Gemini request failed: ' + resp.error);
+          const display = resp.json || resp.text || { status: resp.status };
+          alert('Gemini response:\n' + (typeof display === 'object' ? JSON.stringify(display, null, 2).slice(0,2000) : String(display)));
+          if (window.resourceTracker && window.resourceTracker.addEventLog) window.resourceTracker.addEventLog('[GEMINI] ' + (typeof display === 'object' ? JSON.stringify(display) : String(display)));
+        } catch (e) {
+          geminiBtn.textContent = 'Send to Gemini';
+          geminiBtn.disabled = false;
+          alert('Gemini request failed: ' + (e && e.message ? e.message : String(e)));
+        }
+      } catch (e) {
+        geminiBtn.textContent = 'Send to Gemini';
+        geminiBtn.disabled = false;
+        alert('Gemini capture failed: ' + (e && e.message ? e.message : String(e)));
+      }
+    });
+
+    // Native tab capture via background (more reliable on sites that block getDisplayMedia)
+    const nativeBtn = document.createElement('button');
+    nativeBtn.textContent = 'Capture Tab (native)';
+    nativeBtn.style.padding = '6px 10px';
+    nativeBtn.style.background = '#6a1b9a';
+    nativeBtn.style.color = '#fff';
+    nativeBtn.style.border = 'none';
+    nativeBtn.style.borderRadius = '6px';
+    nativeBtn.style.cursor = 'pointer';
+    captureControl.appendChild(nativeBtn);
+
+    // Debug ping button to verify background messaging and keep service worker alive
+    const pingBtn = document.createElement('button');
+    pingBtn.textContent = 'Ping BG';
+    pingBtn.style.padding = '6px 10px';
+    pingBtn.style.background = '#444';
+    pingBtn.style.color = '#fff';
+    pingBtn.style.border = 'none';
+    pingBtn.style.borderRadius = '6px';
+    pingBtn.style.cursor = 'pointer';
+    pingBtn.title = 'Send a ping to the background service worker (debug)';
+    captureControl.appendChild(pingBtn);
+
+    pingBtn.addEventListener('click', async () => {
+      pingBtn.textContent = 'Pinging...';
+      pingBtn.disabled = true;
+      try {
+        const resp = await new Promise((resolve) => {
+          try { chrome.runtime.sendMessage({ type: 'ping' }, (r) => { if (chrome.runtime.lastError) return resolve({ error: chrome.runtime.lastError.message }); resolve(r); }); }
+          catch (e) { resolve({ error: e && e.message ? e.message : String(e) }); }
+        });
+        pingBtn.textContent = 'Ping BG';
+        pingBtn.disabled = false;
+        if (!resp) return alert('No response from background');
+        if (resp.error) return alert('Ping failed: ' + resp.error);
+        alert('Ping OK — ts: ' + (resp.ts || 'n/a'));
+      } catch (e) {
+        pingBtn.textContent = 'Ping BG';
+        pingBtn.disabled = false;
+        alert('Ping failed: ' + (e && e.message ? e.message : String(e)));
+      }
+    });
+
+    nativeBtn.addEventListener('click', async () => {
+      const s = await this.getCaptureSettings();
+      const endpoint = s.endpoint;
+      const auth = s.authHeader;
+      if (!endpoint) {
+        alert('Please configure a vision endpoint first (click Endpoint).');
+        return;
+      }
+      try {
+        nativeBtn.textContent = 'Capturing...';
+        nativeBtn.disabled = true;
+        // Ask background to capture the visible tab (with timeout)
+        const bgCapturePromise = new Promise((resolve, reject) => {
+          let settled = false;
+          const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            reject(new Error('Background capture timed out'));
+          }, 10000);
+          try {
+            chrome.runtime.sendMessage({ type: 'capture_tab' }, (resp) => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              if (!resp) return reject(new Error('No response from background'));
+              if (resp.error) return reject(new Error(resp.error));
+              resolve(resp.dataUrl);
+            });
+          } catch (e) { if (!settled) reject(e); }
+        });
+
+        try {
+          const dataUrl = await bgCapturePromise;
+          nativeBtn.textContent = 'Capture Tab (native)';
+          nativeBtn.disabled = false;
+
+            // Send captured image to configured endpoint via background to avoid CORS
+            const headers = Object.assign({ 'Content-Type': 'application/json' }, (auth ? { 'Authorization': auth } : {}));
+            const body = JSON.stringify({ image: dataUrl });
+            const resp = await sendRequestBg(endpoint, { method: 'POST', headers, body }, { timeoutMs: 20000, retries: 2 });
+
+            if (!resp) {
+              alert('Failed to send captured image: no response from background proxy');
+            } else if (resp.error) {
+              alert('Failed to send captured image: ' + resp.error);
+            } else {
+              const display = resp.json || resp.text || { status: resp.status };
+              alert('Vision response:\n' + (typeof display === 'object' ? JSON.stringify(display, null, 2).slice(0,2000) : String(display)));
+              if (window.resourceTracker && window.resourceTracker.addEventLog) window.resourceTracker.addEventLog('[NATIVE_CAPTURE] ' + (typeof display === 'object' ? JSON.stringify(display) : String(display)));
+            }
+        } catch (e) {
+          nativeBtn.textContent = 'Capture Tab (native)';
+          nativeBtn.disabled = false;
+          alert('Background capture failed: ' + (e && e.message ? e.message : String(e)));
+        }
+      } catch (e) {
+        nativeBtn.textContent = 'Capture Tab (native)';
+        nativeBtn.disabled = false;
+        alert('Native capture failed: ' + (e && e.message ? e.message : String(e)));
+      }
+    });
 
     // Username change option
     if (this.storedUsername) {

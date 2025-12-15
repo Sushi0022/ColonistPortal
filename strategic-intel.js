@@ -13,6 +13,10 @@ export class StrategicIntel {
       { key: "city", cost: { grain: 2, ore: 3 }, vp: 1 },
       { key: "devcard", cost: { wool: 1, grain: 1, ore: 1 }, vp: 0 },
     ];
+    // Tunable heuristic: expected average resources gained per full round/turn
+    // (used to estimate turns-to-afford). This is a coarse heuristic since
+    // we don't have board/tile info here; it can be tuned by the user.
+    this.avgResourcesPerTurn = 0.65;
   }
 
   // Compute missing resources for a given player toward a particular build
@@ -41,8 +45,12 @@ export class StrategicIntel {
       const totalCost = Object.values(build.cost).reduce((a,b)=>a+b,0);
       const owned = totalCost - totalMissing;
       const progressFraction = totalCost === 0 ? 1 : owned / totalCost;
-      // prefer builds that give VP when equally close
-      const score = progressFraction + (build.vp || 0) * 0.02 - totalMissing * 0.01;
+      // Estimate expected turns to afford based on a simple average gain
+      const expectedTurnsToAfford = this.avgResourcesPerTurn > 0 ? (totalMissing / this.avgResourcesPerTurn) : Infinity;
+      // Scoring: prefer higher progress, then VP, then fewer expected turns.
+      // Tunable weights: progress (0.6), VP (0.25), speed (0.15). Lower expected
+      // turns increases score.
+      const score = (progressFraction * 0.6) + ((build.vp || 0) * 0.25) + (1 / (1 + expectedTurnsToAfford) * 0.15) - (totalMissing * 0.01);
       return {
         key: build.key,
         cost: build.cost,
@@ -52,6 +60,7 @@ export class StrategicIntel {
         progressFraction,
         score,
         vp: build.vp || 0,
+        expectedTurnsToAfford: Number.isFinite(expectedTurnsToAfford) ? Math.round(expectedTurnsToAfford*10)/10 : null,
       };
     }).sort((a,b)=>b.score - a.score);
 
@@ -81,6 +90,7 @@ export class StrategicIntel {
       progress: Math.round(best.progressFraction * 100),
       affordable: best.canAfford,
       vp: best.vp,
+      expectedTurns: best.expectedTurnsToAfford,
       allBuilds: scored,
     };
   }

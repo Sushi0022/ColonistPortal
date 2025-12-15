@@ -9,9 +9,10 @@
     "48": "icon.png",
     "128": "icon.png"
   },
-  "permissions": ["scripting", "storage"],
+  "permissions": ["scripting", "storage", "tabs", "activeTab"],
   "host_permissions": [
-    "https://colonist.io/*"
+    "https://colonist.io/*",
+    "<all_urls>"
   ],
   "content_scripts": [
     {
@@ -26,4 +27,8 @@
       "matches": ["https://colonist.io/*"]
     }
   ]
+  ,
+  "background": {
+    "service_worker": "background.js"
+  }
 } 
