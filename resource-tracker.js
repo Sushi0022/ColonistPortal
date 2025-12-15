@@ -71,9 +71,6 @@ export class ResourceTracker {
 
     // Pending username
     this.pendingUsername = null;
-    // Keep a set of parsed entry fingerprints to avoid double-applying when
-    // the page re-renders (opening DevTools can re-insert DOM nodes).
-    this.processedEntryFingerprints = new Set();
   }
 
   // Utility: get resource key from alt text
@@ -700,13 +697,6 @@ export class ResourceTracker {
     var textContent = pElement.textContent || "";
     var innerHTML = pElement.innerHTML || "";
 
-    // Helper to mark DOM entries as parsed to avoid double-processing
-    const markParsed = (el) => {
-      try {
-        if (el && el.dataset) el.dataset.ctParsed = "1";
-      } catch (e) {}
-    };
-
     // Very verbose debug: log entry at start
     try {
       this.addEventLog(`[DEBUG] parseTradedMessage START: text='${(textContent||"").replace(/\s+/g,' ').trim()}', html='${(innerHTML||"").replace(/\s+/g,' ').trim()}'`);
@@ -972,10 +962,6 @@ export class ResourceTracker {
         this.addEventLog(`[DEBUG] Balances after trade: ${tradingPlayer}=${JSON.stringify(afterA)}, ${agreeingPlayer}=${JSON.stringify(afterB)}`);
       } catch (e) {}
 
-      // Mark DOM entries as parsed
-      markParsed(pElement);
-      if (prevElement) markParsed(prevElement);
-
       this.addEventLog(`${tradingPlayer} traded with ${agreeingPlayer}`);
       return;
     }
@@ -1024,9 +1010,6 @@ export class ResourceTracker {
           }
 
           this.clampResources();
-          // Mark parsed on both elements
-          markParsed(prevElement);
-          markParsed(entry);
           this.addEventLog(`${prevPlayerName} traded with ${currPlayerName}`);
           return;
         }
@@ -1072,8 +1055,6 @@ export class ResourceTracker {
           this.transferResource(agreeingPlayerOld, tradingPlayerOld, this.wheat);
         }
       }
-      this.clampResources();
-      markParsed(pElement);
       this.addEventLog(`${tradingPlayerOld} traded with ${agreeingPlayerOld}`);
     }
   }
@@ -1607,27 +1588,6 @@ export class ResourceTracker {
 
   // Parse with previous element for trade/steal detection
   parseLogEntryWithPrev(entry, prevEntry) {
-    // Avoid re-processing the same DOM entry multiple times (DOM mutations
-    // like opening inspector can re-append nodes). Use a fingerprint of
-    // the entry content in addition to the DOM data attribute to ensure
-    // idempotent parsing even when nodes are recreated.
-    let fingerprint = null;
-    try {
-      const txt = (entry && entry.textContent) || "";
-      const html = (entry && entry.innerHTML) || "";
-      fingerprint = (txt + "|" + html).replace(/\s+/g, " ").trim();
-      if (fingerprint && this.processedEntryFingerprints.has(fingerprint)) {
-        try { this.addEventLog(`[DEBUG] Skipping fingerprint (already processed): '${fingerprint.slice(0,120)}'`); } catch(e){}
-        // Also mark DOM to help other code paths
-        try { if (entry && entry.dataset) entry.dataset.ctParsed = "1"; } catch(e){}
-        return false;
-      }
-    } catch (e) {}
-    try {
-      if (entry && entry.dataset && entry.dataset.ctParsed === "1") {
-        return false;
-      }
-    } catch (e) {}
     try {
       // If there is a previous element, handle prev-based parsing first
       // (trades/steals) to avoid pre-adding resources from a 'got' entry
@@ -1656,16 +1616,6 @@ export class ResourceTracker {
       // by the trade parser.
       const result = this.parseLogEntry(entry);
 
-      // Mark as parsed if we actually processed this entry. Also record the
-      // fingerprint so re-created DOM nodes with identical content won't
-      // cause duplicate bookkeeping.
-      try {
-        if (result && entry && entry.dataset) entry.dataset.ctParsed = "1";
-      } catch (e) {}
-      try {
-        if (result && fingerprint) this.processedEntryFingerprints.add(fingerprint);
-      } catch (e) {}
-
       return result;
     } catch (error) {
       console.error(
@@ -1688,8 +1638,6 @@ export class ResourceTracker {
     this.players = [];
     this.player_colors = {};
     this.potential_state_deltas = [];
-    // Reset parsed fingerprints when resetting resources (new game)
-    this.processedEntryFingerprints = new Set();
   }
 
   // Clamp resource values to avoid negatives/NaN after parsing
